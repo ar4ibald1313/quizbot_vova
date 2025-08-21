@@ -1,7 +1,11 @@
-# main.py (aiogram 3.x)
-# Функции: распределение по командам с равномерным балансом,
-# визуализация (dice.gif + картинки команд), админ-сброс через UI.
-# Требует: aiogram==3.x, python-dotenv
+# main.py — aiogram 3.x
+# Рабочая версия с поправками логики:
+#  - Админская кнопка «⚠️ Сбросить» (видна только ADMIN_IDS). После подтверждения вывод: «База очищена»
+#  - Кнопка «Определи мою судьбу» показывается ТОЛЬКО если пользователь ещё не распределён
+#  - «Моя команда»: если записи нет — текст «Вы не определили свою судьбу» + кнопка «Определи мою судьбу»
+#  - Визуал: перед распределением отправляется /assets/dice.gif; после — картинка команды
+#
+# Требуется: aiogram==3.x, python-dotenv. Тех. библиотеки НЕ менялись.
 
 import asyncio
 import os
@@ -18,17 +22,12 @@ from dotenv import load_dotenv
 
 # -------------------- Конфиг --------------------
 load_dotenv()
-
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Не найден TELEGRAM_BOT_TOKEN в .env")
-
-# Можно перечислить несколько ID через запятую в .env
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x.isdigit()}
 
 DB_PATH = "teams.db"
-
-# Визуальные ресурсы
 ASSETS_DIR = "assets"
 DICE_GIF = os.path.join(ASSETS_DIR, "dice.gif")
 
@@ -37,7 +36,7 @@ TEAMS = [
     ("Эльфы", "Вечность за нами, победа в нас!", os.path.join(ASSETS_DIR, "elves.jpg")),
     ("Орки", "Кто сильнее — тот правее!", os.path.join(ASSETS_DIR, "orcs.jpg")),
     ("Гномы", "Камень — крепость, сталь — наша песня!", os.path.join(ASSETS_DIR, "dwarves.jpg")),
-    ("Полурослики", "Мал да удал, но удача велика!", os.path.join(ASSETS_DIR, "halfings.jpg")),  # по твоему имени
+    ("Полурослики", "Мал да удал, но удача велика!", os.path.join(ASSETS_DIR, "halfings.jpg")),
     ("Драконорожденные", "Огонь в крови — слава в делах!", os.path.join(ASSETS_DIR, "dragons.jpg")),
 ]
 
@@ -94,12 +93,14 @@ def pick_balanced_team() -> int:
     candidates = [i for i, c in enumerate(cnts) if c == mn]
     return random.choice(candidates)
 
-# -------------------- UI --------------------
-def main_kb(user_id: int) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text="🎲 Определи мою судьбу", callback_data="join")],
-        [InlineKeyboardButton(text="📊 Моя команда", callback_data="myteam")],
-    ]
+# -------------------- Клавиатуры --------------------
+def build_kb(user_id: int) -> InlineKeyboardMarkup:
+    """Динамическая клавиатура под пользователя."""
+    rows = []
+    team = get_player_team(user_id)
+    if team is None:
+        rows.append([InlineKeyboardButton(text="🎲 Определи мою судьбу", callback_data="join")])
+    rows.append([InlineKeyboardButton(text="📊 Моя команда", callback_data="myteam")])
     if user_id in ADMIN_IDS:
         rows.append([InlineKeyboardButton(text="⚠️ Сбросить", callback_data="admin_reset")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -114,31 +115,29 @@ def team_caption(team_index: int) -> str:
     name, motto, _ = TEAMS[team_index]
     return f"<b>{name}</b>\n{motto}"
 
-# -------------------- Бот --------------------
+# -------------------- Бот и диспетчер (ЕДИНСТВЕННЫЕ экземпляры) --------------------
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
+# -------------------- Хэндлеры --------------------
 @dp.message(CommandStart())
 async def on_start(message: types.Message):
     init_db()
-    await message.answer(
-        "Привет! Жми «🎲 Определи мою судьбу», и я распределю тебя в одну из 5 фэнтези-команд.",
-        reply_markup=main_kb(message.from_user.id)
-    )
+    await message.answer("Привет! Жми кнопку ниже 👇", reply_markup=build_kb(message.from_user.id))
 
 @dp.message(Command("myteam"))
 async def on_myteam_cmd(message: types.Message):
     init_db()
     team = get_player_team(message.from_user.id)
     if team is None:
-        await message.answer("Ты ещё не распределён. Жми кнопку ниже.", reply_markup=main_kb(message.from_user.id))
+        await message.answer("Вы не определили свою судьбу.", reply_markup=build_kb(message.from_user.id))
     else:
         _, _, pic = TEAMS[team]
         if os.path.isfile(pic):
             await bot.send_photo(message.chat.id, FSInputFile(pic), caption=team_caption(team),
-                                 reply_markup=main_kb(message.from_user.id))
+                                 reply_markup=build_kb(message.from_user.id))
         else:
-            await message.answer(team_caption(team), reply_markup=main_kb(message.from_user.id))
+            await message.answer(team_caption(team), reply_markup=build_kb(message.from_user.id))
 
 @dp.callback_query(F.data == "admin_reset")
 async def on_admin_reset(cb: types.CallbackQuery):
@@ -151,7 +150,7 @@ async def on_admin_reset(cb: types.CallbackQuery):
 async def on_reset_cancel(cb: types.CallbackQuery):
     if cb.from_user.id not in ADMIN_IDS:
         return await cb.answer("Только для админов.")
-    await cb.message.edit_text("Отменено.", reply_markup=main_kb(cb.from_user.id))
+    await cb.message.edit_text("Отменено.", reply_markup=build_kb(cb.from_user.id))
     await cb.answer()
 
 @dp.callback_query(F.data == "confirm_reset_yes")
@@ -159,22 +158,22 @@ async def on_reset_yes(cb: types.CallbackQuery):
     if cb.from_user.id not in ADMIN_IDS:
         return await cb.answer("Только для админов.")
     reset_all()
-    await cb.message.edit_text("Готово. Всё очищено.", reply_markup=main_kb(cb.from_user.id))
+    await cb.message.edit_text("База очищена", reply_markup=build_kb(cb.from_user.id))
     await cb.answer("Сброс выполнен.")
 
 @dp.callback_query(F.data == "myteam")
 async def on_myteam_cb(cb: types.CallbackQuery):
     team = get_player_team(cb.from_user.id)
     if team is None:
-        await cb.message.edit_text("Ты ещё не распределён. Жми кнопку ниже.", reply_markup=main_kb(cb.from_user.id))
+        await cb.message.edit_text("Вы не определили свою судьбу.", reply_markup=build_kb(cb.from_user.id))
     else:
         await cb.message.delete()
         _, _, pic = TEAMS[team]
         if os.path.isfile(pic):
             await bot.send_photo(cb.message.chat.id, FSInputFile(pic), caption=team_caption(team),
-                                 reply_markup=main_kb(cb.from_user.id))
+                                 reply_markup=build_kb(cb.from_user.id))
         else:
-            await bot.send_message(cb.message.chat.id, team_caption(team), reply_markup=main_kb(cb.from_user.id))
+            await bot.send_message(cb.message.chat.id, team_caption(team), reply_markup=build_kb(cb.from_user.id))
     await cb.answer()
 
 @dp.callback_query(F.data == "join")
@@ -184,7 +183,18 @@ async def on_join(cb: types.CallbackQuery):
     team_existing = get_player_team(user_id)
     await cb.answer()
 
-    # 1) Анимация "кубик" — если файл есть
+    # Уже распределён — просто показать команду (без повторной кнопки "join")
+    if team_existing is not None:
+        _, _, pic = TEAMS[team_existing]
+        if os.path.isfile(pic):
+            await bot.send_photo(cb.message.chat.id, FSInputFile(pic), caption=team_caption(team_existing),
+                                 reply_markup=build_kb(cb.from_user.id))
+        else:
+            await bot.send_message(cb.message.chat.id, team_caption(team_existing),
+                                   reply_markup=build_kb(cb.from_user.id))
+        return
+
+    # Анимация кубика
     if os.path.isfile(DICE_GIF):
         try:
             await bot.send_animation(cb.message.chat.id, FSInputFile(DICE_GIF), caption="🎲 Определяем твою судьбу…")
@@ -192,18 +202,7 @@ async def on_join(cb: types.CallbackQuery):
             pass
         await asyncio.sleep(1.0)
 
-    # 2) Если уже распределён — показать команду
-    if team_existing is not None:
-        _, _, pic = TEAMS[team_existing]
-        if os.path.isfile(pic):
-            await bot.send_photo(cb.message.chat.id, FSInputFile(pic), caption=team_caption(team_existing),
-                                 reply_markup=main_kb(cb.from_user.id))
-        else:
-            await bot.send_message(cb.message.chat.id, team_caption(team_existing),
-                                   reply_markup=main_kb(cb.from_user.id))
-        return
-
-    # 3) Баланс и сохранение
+    # Балансное распределение + сохранение
     team_idx = pick_balanced_team()
     insert_player(
         user_id=user_id,
@@ -212,13 +211,13 @@ async def on_join(cb: types.CallbackQuery):
         team_index=team_idx
     )
 
-    # 4) Показ результата
+    # Показ результата
     _, _, pic = TEAMS[team_idx]
     if os.path.isfile(pic):
         await bot.send_photo(cb.message.chat.id, FSInputFile(pic), caption=team_caption(team_idx),
-                             reply_markup=main_kb(cb.from_user.id))
+                             reply_markup=build_kb(cb.from_user.id))
     else:
-        await bot.send_message(cb.message.chat.id, team_caption(team_idx), reply_markup=main_kb(cb.from_user.id))
+        await bot.send_message(cb.message.chat.id, team_caption(team_idx), reply_markup=build_kb(cb.from_user.id))
 
 # -------------------- Точка входа --------------------
 async def main():

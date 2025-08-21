@@ -8,6 +8,7 @@ from typing import List, Optional
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, FSInputFile
+from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
 from PIL import Image, ImageDraw, ImageFilter
@@ -150,7 +151,7 @@ def team_caption(team_index: int) -> str:
     return f"<b>{name}</b>\n{motto}"
 
 # -------------------- Бот --------------------
-bot = Bot(BOT_TOKEN, parse_mode="HTML")
+bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
 @dp.message(CommandStart())

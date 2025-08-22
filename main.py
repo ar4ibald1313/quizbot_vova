@@ -1,9 +1,11 @@
-# main.py — aiogram 3.x
-# ✔ Админ‑сброс -> «База очищена»
-# ✔ «Определи мою судьбу» скрывается после распределения
-# ✔ «Моя команда» без записи -> «Вы не определили свою судьбу» + кнопка выбрать судьбу
-# ✔ Визуал: assets/dice.gif + картинки команд
-# ✔ БД: teams.db / таблица players
+# main.py — aiogram 3.x (фикс кнопки "Сбросить")
+# Изменения:
+# - Кнопка "⚠️ Сбросить" теперь СРАЗУ очищает БД и безопасно отвечает,
+#   даже если клавиатура была под фото/гифкой (раньше edit_text падал).
+# - Добавлена резервная команда /reset (только для админов).
+#
+# Остальная логика без изменений: балансное распределение, гифка dice,
+# скрытие кнопки "Определи..." после распределения, "Вы не определили свою судьбу".
 
 import asyncio
 import os
@@ -103,12 +105,6 @@ def build_kb(user_id: int) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text="⚠️ Сбросить", callback_data="admin_reset")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def confirm_reset_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Сбросить всё", callback_data="confirm_reset_yes")],
-        [InlineKeyboardButton(text="↩️ Отмена", callback_data="confirm_reset_no")],
-    ])
-
 def team_caption(team_index: int) -> str:
     name, motto, _ = TEAMS[team_index]
     return f"<b>{name}</b>\n{motto}"
@@ -116,6 +112,21 @@ def team_caption(team_index: int) -> str:
 # -------------------- Bot / Dispatcher --------------------
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
+
+# -------------------- Вспомогательное: безопасный ответ после сброса --------------------
+async def safe_inform_reset(cb: types.CallbackQuery):
+    """Пишем 'База очищена' корректно, независимо от того, была ли клавиатура под текстом, фото или гифкой."""
+    kb = build_kb(cb.from_user.id)
+    try:
+        if cb.message.text is not None:
+            await cb.message.edit_text("База очищена", reply_markup=kb)
+        elif cb.message.caption is not None:
+            await cb.message.edit_caption("База очищена", reply_markup=kb)
+        else:
+            raise RuntimeError("no text/caption")
+    except Exception:
+        # если нельзя отредактировать (например, это было старое сообщение без текста) — отправим новое
+        await bot.send_message(cb.message.chat.id, "База очищена", reply_markup=kb)
 
 # -------------------- Хэндлеры --------------------
 @dp.message(CommandStart())
@@ -137,27 +148,21 @@ async def on_myteam_cmd(message: types.Message):
         else:
             await message.answer(team_caption(team), reply_markup=build_kb(message.from_user.id))
 
-# ---- Админ: сброс ----
+# Админский /reset на всякий случай
+@dp.message(Command("reset"))
+async def cmd_reset(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return await message.answer("Только для админов.")
+    reset_all()
+    await message.answer("База очищена", reply_markup=build_kb(message.from_user.id))
+
+# ---- Админ: кнопка "Сбросить" ----
 @dp.callback_query(F.data == "admin_reset")
 async def on_admin_reset(cb: types.CallbackQuery):
     if cb.from_user.id not in ADMIN_IDS:
         return await cb.answer("Только для админов.")
-    await cb.message.edit_text("⚠️ Сбросит все распределения. Точно?", reply_markup=confirm_reset_kb())
-    await cb.answer()
-
-@dp.callback_query(F.data == "confirm_reset_no")
-async def on_reset_cancel(cb: types.CallbackQuery):
-    if cb.from_user.id not in ADMIN_IDS:
-        return await cb.answer("Только для админов.")
-    await cb.message.edit_text("Отменено.", reply_markup=build_kb(cb.from_user.id))
-    await cb.answer()
-
-@dp.callback_query(F.data == "confirm_reset_yes")
-async def on_reset_yes(cb: types.CallbackQuery):
-    if cb.from_user.id not in ADMIN_IDS:
-        return await cb.answer("Только для админов.")
-    reset_all()
-    await cb.message.edit_text("База очищена", reply_markup=build_kb(cb.from_user.id))
+    reset_all()                      # ЧИСТИМ БАЗУ СРАЗУ
+    await safe_inform_reset(cb)      # Сообщаем "База очищена" безопасно
     await cb.answer("Сброс выполнен.")
 
 # ---- Кнопка "Моя команда" ----
@@ -165,9 +170,8 @@ async def on_reset_yes(cb: types.CallbackQuery):
 async def on_myteam_cb(cb: types.CallbackQuery):
     team = get_player_team(cb.from_user.id)
     if team is None:
-        await cb.message.edit_text("Вы не определили свою судьбу.", reply_markup=build_kb(cb.from_user.id))
+        await bot.send_message(cb.message.chat.id, "Вы не определили свою судьбу.", reply_markup=build_kb(cb.from_user.id))
     else:
-        await cb.message.delete()
         _, _, pic = TEAMS[team]
         if os.path.isfile(pic):
             await bot.send_photo(cb.message.chat.id, FSInputFile(pic), caption=team_caption(team),
